@@ -234,6 +234,7 @@ def xsd_patched(xsd, allow, choice=()):
 def xsd_check(name, xsd):
     fx = os.path.join(BR, 'fixtures', name + '.x3d')
     if not os.path.exists(fx): return {'ok': False, 'msg': 'no fixture'}
+    if not os.path.isfile(xsd): return {'ok': False, 'msg': 'X3D schema unavailable: set X3DXSD or --xsd'}
     note = ''
     try: spec = json.load(open(os.path.join(BR, 'fixtures', name + '.test.json')))
     except Exception: spec = {}
@@ -241,7 +242,8 @@ def xsd_check(name, xsd):
     if allow or choice:
         px = xsd_patched(xsd, allow, choice)
         if px: xsd = px; note = ' + XSD patched: ' + '; '.join([n + ' added to the Full child content model' for n in allow] + [c + ' children as a choice, not a sequence' for c in choice])
-    p = subprocess.run(['xmllint', '--noout', '--schema', xsd, fx], capture_output=True, text=True)
+    try: p = subprocess.run(['xmllint', '--noout', '--schema', xsd, fx], capture_output=True, text=True)
+    except FileNotFoundError: return {'ok': False, 'msg': 'xmllint unavailable: install libxml2-utils (or the platform equivalent)'}
     return {'ok': p.returncode == 0, 'msg': (p.stderr.strip().splitlines() or [''])[-1][:300], 'validator': 'xmllint (libxml2) vs x3d-4.0.xsd from x3d_mcp' + note}
 
 
@@ -258,7 +260,7 @@ def cmd_check(a, names=None):
     res = run_tests(names, not a.no_xite, getattr(a, 'babylon', None)); out = {}
     for n in names:
         x = xsd_check(n, a.xsd); t = (res.get('results') or {}).get(n, {'ok': False, 'msg': res.get('error', 'no result')})
-        ok = x['ok'] and t.get('ok', False)
+        ok = x['ok'] and t.get('ok', False) and res.get('ok') is not False and not res.get('error')
         rec = {'node': n, 'pass': ok, 'xsd': x, 'test': t, 'env': res.get('env'), 'driver_commit': git_head()}
         os.makedirs(os.path.join(BR, 'receipts'), exist_ok=True)
         json.dump(rec, open(os.path.join(BR, 'receipts', n + '.json'), 'w'), indent=1); open(os.path.join(BR, 'receipts', n + '.json'), 'a').write('\n')
@@ -276,7 +278,7 @@ def regression_gate(a):
         cmd = ['node', os.path.join(HERE, 'smoke.js'), os.path.join(BR, 'fixtures', '_route-chain.x3d'), '4'] + (['--babylon', a.babylon] if a.babylon else [])
         sm = json.loads(subprocess.run(cmd, capture_output=True, text=True, cwd=BR, timeout=170).stdout.strip().splitlines()[-1])
     except Exception as e: sm = {'error': str(e)[:160]}
-    ok = chain["pass"] and not sm.get('error') and not sm.get('pageErrors') and sm.get('switches') == [1] and not sm.get('notes') and (sm.get('events') or {}).get('Ch.value_changed', 0) >= 4 and (sm.get('events') or {}).get('Dm.value_changed', 0) >= 4
+    ok = chain["pass"] and sm.get('ok') is True and sm.get('frames', 0) > 0 and not sm.get('error') and not sm.get('pageErrors') and sm.get('switches') == [1] and not sm.get('notes') and (sm.get('events') or {}).get('Ch.value_changed', 0) >= 4 and (sm.get('events') or {}).get('Dm.value_changed', 0) >= 4
     g = {'ok': ok, 'chain': chain['pass'], 'body': {k: sm.get(k) for k in ('frames', 'babylon', 'adapter', 'pageErrors', 'notes', 'switches', 'error')}}; g['body']['follower_events'] = {k: (sm.get('events') or {}).get(k) for k in ('Ch.value_changed', 'Dm.value_changed')}
     json.dump(g, open(os.path.join(BR, 'receipts', '_gate.json'), 'w'), indent=1); print('gate', 'PASS' if ok else 'FAIL', json.dumps(g['body'])[:300]); return g
 
@@ -306,20 +308,28 @@ def cmd_report(a):
 
 def cmd_batch(a):
     """Check enough new nodes to make a batch of n (counting nodes bridged earlier but not yet reported), then with --close number the batch and write BATCH-NN.md."""
+    if a.no_xite: raise SystemExit('batch requires X_ITE comparison; --no-xite is only for local exploratory checks')
     d = load(); have = unreported(d)
     ready = [k for k in pick(d, 10 ** 6) if os.path.exists(os.path.join(BR, 'src', 'nodes', k + '.js'))][:max(0, a.n - len(have))]
     if len(have) + len(ready) < a.n: print(f'{len(have)} unreported + {len(ready)} with a module is less than {a.n}; scaffold + implement the next ones first:', ', '.join(pick(d, a.n)))
-    res = cmd_check(a, ready) if ready else {}
+    # Pending nodes may have stale or local-only receipts from an intervening
+    # check. Recheck the prospective batch, not just freshly scaffolded nodes.
+    checked = have[:a.n] + ready
+    res = cmd_check(a, checked) if checked else {}
     gate = regression_gate(a)
     d = load()
-    for k in ready:
+    for k in checked:
         if res[k]['pass'] and gate['ok']:
             gaps = res[k]['test'].get('gaps'); d['nodes'][k]['status'] = 'gap' if gaps else 'bridged'
             if gaps: d['nodes'][k]['note'] = '; '.join(gaps)
         else: d['nodes'][k]['status'] = 'wip'
     save(d)
-    for k in ready: print(f"  {k}: {d['nodes'][k]['status']}")
+    for k in checked: print(f"  {k}: {d['nodes'][k]['status']}")
     have = unreported(d)
+    # Existing unreported nodes must not let a failed current gate close a batch.
+    if not gate['ok'] or any(not res[k]['pass'] for k in checked):
+        print('batch remains open: node checks or regression gate failed')
+        return False
     if not a.close or len(have) < a.n: print(f'{len(have)} nodes bridged and not yet in a batch report (need {a.n})'); return
     nb = 1 + max([int(re.sub(r'\D', '', f)) for f in os.listdir(BR) if re.match(r'BATCH-\d+\.md', f)] or [0])
     take = have[:a.n]
@@ -338,7 +348,9 @@ def main():
         if name == 'report': p.add_argument('batch', type=int)
         if name in ('scaffold', 'check'): p.add_argument('nodes', nargs='+')
     a = ap.parse_args()
-    {'init': cmd_init, 'status': cmd_status, 'next': cmd_next, 'scaffold': cmd_scaffold, 'check': cmd_check, 'batch': cmd_batch, 'report': cmd_report}[a.cmd](a)
+    result = {'init': cmd_init, 'status': cmd_status, 'next': cmd_next, 'scaffold': cmd_scaffold, 'check': cmd_check, 'batch': cmd_batch, 'report': cmd_report}[a.cmd](a)
+    if result is False or (a.cmd == 'check' and not all(r['pass'] for r in result.values())): return 1
+    return 0
 
 
-main()
+if __name__ == '__main__': sys.exit(main())

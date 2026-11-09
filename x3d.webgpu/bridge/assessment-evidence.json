@@ -1,0 +1,132 @@
+{
+  "schemaVersion": 1,
+  "assessmentDate": "2026-11-08",
+  "timezone": "America/New_York",
+  "repository": "https://github.com/hagopjay/x3d.loom",
+  "baselineCommit": "6b3cb769a298b42e591be30f30df5547bb133eb0",
+  "priorities": [
+    "X3D ecosystem interoperability",
+    "X3D to Babylon.js import first",
+    "explicit fidelity reporting"
+  ],
+  "tracker": {
+    "total": 260,
+    "statuses": {
+      "bridged": 24,
+      "gap": 76,
+      "base": 75,
+      "todo": 76,
+      "claimed": 8,
+      "blocked": 1
+    },
+    "nodeModules": 100
+  },
+  "canonicalReaderBundle": {
+    "registeredTypes": 180,
+    "namesIn40Tracker": 176,
+    "outside40Tracker": [
+      "BlendMode",
+      "DepthMode",
+      "EnvironmentLight",
+      "GaussianSplats"
+    ],
+    "trackerBaselineButAbsent": [
+      "ElevationGrid",
+      "MetadataDouble",
+      "MetadataInteger",
+      "MetadataSet",
+      "PolylineEmitter",
+      "TextureProperties",
+      "TriangleSet"
+    ],
+    "claimedButRegistered": [
+      "Collision",
+      "CoordinateInterpolator",
+      "CoordinateInterpolator2D",
+      "Disk2D",
+      "Extrusion",
+      "MultiTextureCoordinate",
+      "PointProperties",
+      "Rectangle2D"
+    ],
+    "scope": "registration only, not rendered support"
+  },
+  "localValidation": {
+    "command": "cd x3d.webgpu/bridge && npm test",
+    "passed": 31,
+    "failed": 0,
+    "skipped": 0,
+    "groups": {
+      "tooling": 8,
+      "fidelity": 8,
+      "lifecycle": 6,
+      "existingEventFixtures": 9
+    },
+    "node": "v24.22.1",
+    "python": "Python 3.12.14",
+    "readerBundleSyntax": "pass",
+    "bodyBundleSyntax": "pass",
+    "pythonDriverCompile": "pass",
+    "gitDiffWhitespace": "pass"
+  },
+  "browserValidation": {
+    "status": "blocked-at-browser-launch",
+    "playwright": "1.62.1",
+    "chromiumDownloaded": "151.0.7922.34",
+    "xiteDownloaded": "16.6.0",
+    "babylonDownloaded": "9.32.0",
+    "reason": "Host denied socket() for Chromium process singleton (EPERM). Runner returned exit status 1.",
+    "newReferenceComparisons": 0,
+    "newGpuRenders": 0,
+    "newPixelParityResults": 0,
+    "performanceMeasured": false
+  },
+  "reproductions": {
+    "crossWorldIds": {
+      "baselineIds": [
+        0,
+        0
+      ],
+      "baselineCallbackValues": [
+        [
+          2.5
+        ],
+        []
+      ],
+      "patchedIds": [
+        0,
+        1
+      ],
+      "patchedCallbackValues": [
+        [
+          2.5
+        ],
+        [
+          7.5
+        ]
+      ]
+    },
+    "sharedRenderOccurrence": {
+      "method": "real Body methods with minimal TransformNode stubs, no GPU",
+      "observedTranslations": [
+        0,
+        2
+      ],
+      "expectedTranslations": [
+        2,
+        2
+      ],
+      "status": "reported, not fixed"
+    }
+  },
+  "remainingWork": [
+    "DEF/USE render occurrence propagation",
+    "full transform/shear preservation",
+    "IndexedFaceSet triangulation and independent indices",
+    "unit conversion",
+    "complete media resource teardown",
+    "automatic execution-context activation ownership",
+    "browser X_ITE and Babylon validation",
+    "reproducible per-page capability manifests"
+  ]
+}

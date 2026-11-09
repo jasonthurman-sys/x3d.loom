@@ -54,8 +54,7 @@
   };
 
   /* ---------------------------------------------------------------- geometry */
-  let serial = 9e6;
-  const mkNode = (w, type, f) => { const n = { type, def: null, f, id: serial++, out: null }; w.nodes.push(n); return n; };
+  const mkNode = (w, type, f) => { const n = { type, def: null, f, id: R.allocNodeId(), out: null }; w.nodes.push(n); return n; };
   const ifs = (w, n, P, UV, ci, ti, crease, ccw, solid) => {
     n.type = 'IndexedFaceSet';
     n.f = { coord: mkNode(w, 'Coordinate', { point: Float32Array.from(P) }), normal: null, color: null, texCoord: mkNode(w, 'TextureCoordinate', { point: Float32Array.from(UV), mapping: '' }), attrib: [],

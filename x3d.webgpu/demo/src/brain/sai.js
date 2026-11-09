@@ -122,6 +122,7 @@
         return toSAI(fd[0], v);
       },
       set(_t, prop, value) {
+        if (raw._disposed) throw new Error('This X3D node has been disposed.');
         const fd = R.fdefsOf(raw)[prop];
         if (!fd) throw new Error(`${raw.type} has no field ${prop}`);
         if (prop === 'children' && fd[0] === 'MFNode') { raw.f.children = Array.from(value, unwrap); raw.version = (raw.version || 0) + 1; R.hooks.changed(raw, 'children'); return true; }
@@ -135,13 +136,13 @@
     return p;
   }
   /* live MFNode over a raw array (a node's children, or the scene's roots): push enters the body */
-  function mfNode(arr, owner) {
+  function mfNode(arr, owner, world) {
     return new Proxy(arr, {
       get(t, prop) {
         if (prop === 'getTypeName') return () => 'MFNode';
         if (prop === 'length') return t.length;
         if (typeof prop === 'string' && /^\d+$/.test(prop)) return t[+prop] ? wrap(t[+prop]) : undefined;
-        if (prop === 'push') return (...ns) => { for (const n of ns) { const r = unwrap(n); t.push(r); if (BODY) BODY.adopt(r, owner || null); } return t.length; };
+        if (prop === 'push') return (...ns) => { if ((owner && owner._disposed) || (world && world.disposed)) throw new Error('This X3D execution context has been disposed.'); for (const n of ns) { const r = unwrap(n); if (r._disposed) throw new Error('Cannot adopt a disposed X3D node.'); t.push(r); if (BODY) BODY.adopt(r, owner || null); } return t.length; };
         if (prop === Symbol.iterator) return function* () { for (const x of t) yield wrap(x); };
         if (typeof prop === 'string' && typeof Array.prototype[prop] === 'function') return (...a) => Array.prototype[prop].apply(t.map(wrap), a);
         return t[prop];
@@ -154,6 +155,7 @@
 
   /* an output event that the page listens to: set the field, call the callbacks, send it down the ROUTEs */
   function fire(node, field, value) {
+    if (node._disposed) return;
     node.f[field] = value;
     const cb = node.cbs && node.cbs[field];
     if (cb) { const fd = R.fdefsOf(node)[field], sv = toSAI(fd ? fd[0] : '', value); for (const fn of cb.values()) { try { fn(sv); } catch (e) { console.error(e); } } }
@@ -170,6 +172,7 @@
   /* an output the body itself produces (a TimeSensor's fraction_changed, time, isActive) also reaches the page's addFieldCallback listeners, once per timestamp */
   const emitBase = R.events.emit;
   R.events.emit = function (node, field, value) {
+    if (node._disposed) return;
     const cb = node.cbs && node.cbs[field];
     if (cb && cb.size && !this.firedOut.has(node.id + '.' + field)) { const fd = R.fdefsOf(node)[field], sv = toSAI(fd ? fd[0] : '', value); for (const fn of cb.values()) { try { fn(sv); } catch (e) { console.error(e); } } }
     return emitBase.call(this, node, field, value);
@@ -179,26 +182,47 @@
 
   /* ------------------------------------------------------------------ scenes */
   function makeScene(world, isMain) {
+    const assertLive = () => { if (world.disposed) throw new Error('This X3D scene has been disposed.'); };
     const sc = {
       _world: world,
-      get rootNodes() { return mfNode(world.children, null); },
-      addRootNode(n) { const r = unwrap(n); world.children.push(r); if (BODY && sc === MAINSCENE) BODY.adopt(r, null); },
+      getFidelityReport() { return world.fidelity || null; },
+      get rootNodes() { assertLive(); return mfNode(world.children, null, world); },
+      addRootNode(n) { assertLive(); const r = unwrap(n); if (r._disposed) throw new Error('Cannot adopt a disposed X3D node.'); world.children.push(r); if (BODY && sc === MAINSCENE) BODY.adopt(r, null); },
       addComponent() {},
-      getNamedNode(name) { const n = world.defs.get(name) || (MAINSCENE && MAINSCENE._world.defs.get(name)); if (!n) throw new Error(`Node named '${name}' not found.`); return wrap(n); },
+      getNamedNode(name) { assertLive(); const n = world.defs.get(name) || (MAINSCENE && MAINSCENE._world.defs.get(name)); if (!n) throw new Error(`Node named '${name}' not found.`); return wrap(n); },
       createNode(type) {
-        const def = R.DEFS[type]; if (!def) throw new Error(`Unknown node type ${type}`);
-        const n = { type, def: null, f: {}, id: 1e6 + (makeScene.k = (makeScene.k || 0) + 1), out: null };
+        assertLive();
+        const def = Object.hasOwn(R.DEFS, type) ? R.DEFS[type] : null; if (!def) throw new Error(`Unknown node type ${type}`);
+        const n = { type, def: null, f: {}, id: R.allocNodeId(), out: null };
         for (const [name, [t, , d]] of Object.entries(def)) { const T = R.FLAT && R.FLAT[type + '.' + name]; n.f[name] = T ? new T(0) : t === 'MFNode' ? [] : R.clone(d); }
         world.nodes.push(n);
         return wrap(n);
       },
       addRoute(a, fa, b, fb) {
+        assertLive();
         const A = unwrap(a), Bn = unwrap(b), from = R.resolveField(A, fa, 'out'), to = R.resolveField(Bn, fb, 'in');
+        if (A._disposed || Bn._disposed) throw new Error('Cannot route to or from a disposed X3D node.');
         if (!from || !to) throw new Error(`Bad route ${A.type}.${fa} to ${Bn.type}.${fb}`);
         const have = (A.out && A.out[from]) || [];
         if (have.some((r) => r.to === Bn && r.toField === to)) return;
         const r = { from: A, fromField: from, to: Bn, toField: to, label: `${A.def || A.type}.${from} → ${Bn.def || Bn.type}.${to}`, discrete: /^(SFBool|SFTime|SFInt32|SFString)$/.test(R.fieldType(A, from)) };
         ((A.out ||= {})[from] ||= []).push(r); (world.routes ||= []).push(r);
+      },
+      dispose() {
+        if (world.disposed) return false;
+        if (world === WORLD || (R.bridge && R.bridge.referencesWorld(world, WORLD))) throw new Error('Cannot dispose a world used by the active scene; detach its nodes or replace the scene first.');
+        try {
+          if (R.bridge && R.bridge.disposeWorld) return R.bridge.disposeWorld(world);
+          world.disposed = true;
+          for (const n of world.nodes) { n._disposed = true; n.out = null; if (n.cbs) for (const c of Object.values(n.cbs)) c.clear(); }
+          return true;
+        } finally {
+          if (world.disposed) {
+            const nodes = new Set(world.nodes);
+            if (BODY) BODY.timeSensors = (BODY.timeSensors || []).filter((n) => !nodes.has(n));
+            if (MAINSCENE) for (const [key, n] of MAINSCENE._world.defs) if (nodes.has(n)) MAINSCENE._world.defs.delete(key);
+          }
+        }
       },
     };
     return sc;
@@ -250,6 +274,7 @@
     },
     async replaceWorld(sc) {
       const world = sc._world;
+      if (world.disposed) throw new Error('Cannot replace the world with a disposed X3D scene.');
       MAINSCENE = sc; B.currentScene = sc; WORLD = world;
       BODY.timeSensors = world.nodes.filter((n) => n.type === 'TimeSensor');
       BODY.setWorld(world, sc._base || location.href, (u, base) => vfsResolve(new URL(u, base).href));

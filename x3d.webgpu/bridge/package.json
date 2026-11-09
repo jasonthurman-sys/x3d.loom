@@ -1,0 +1,18 @@
+{
+  "name": "x3d-loom-bridge-validation",
+  "version": "0.0.0",
+  "private": true,
+  "engines": { "node": ">=20" },
+  "description": "Validation tools for the experimental X3D to Babylon.js bridge",
+  "scripts": {
+    "test": "node --test tools/*.test.js",
+    "test:tooling": "node --test tools/tooling.test.js",
+    "test:fidelity": "node --test tools/fidelity.test.js",
+    "test:lifecycle": "node --test tools/lifecycle.test.js",
+    "test:fixtures": "node tools/run-tests.js",
+    "browser:install": "playwright install chromium"
+  },
+  "devDependencies": {
+    "playwright": "1.62.1"
+  }
+}

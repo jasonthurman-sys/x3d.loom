@@ -6,6 +6,7 @@
      extend      { ExistingNode: { newField: [...] } } fields added to nodes other ports defined
      flat        { 'Node.field': Float32Array|Int32Array } big arrays kept as typed arrays
      init(n, world)           once per parsed world, after the ROUTEs are wired
+     dispose(n, world)        optional cleanup when the owner explicitly disposes an unused world
      receive(n, field, v)     an event arrives; return true when it is handled here (the stock handler is skipped)
      tick(n, now)             once per timestamp, before the event queue drains (sensors that poll, followers that move)
      build(body, n, parent, chain)   Babylon side: make what the node draws; return the record body.rec keeps
@@ -45,10 +46,62 @@ BR.node = function (name, spec) {
   return spec;
 };
 BR.fieldOr = (n, f, d) => (n.f[f] === undefined ? d : n.f[f]);
-BR.emit = (n, field, value) => { n.f[field] = value; events.emit(n, field, value); };   // an output event raised by a bridge node
+BR.emit = (n, field, value) => { if (!n._disposed) { n.f[field] = value; events.emit(n, field, value); } };   // an output event raised by a bridge node
+
+// Detached execution contexts may be imported later, so replacing a world does
+// not destroy them. Their owner must explicitly release an unused context.
+// This releases runtime ownership; media nodes still need their own dispose hook.
+BR.referencesWorld = function (world, activeWorld) {
+  if (!activeWorld) return false;
+  if (world === activeWorld) return true;
+  const owned = new Set(world.nodes), seen = new Set();
+  const visit = (n) => {
+    if (!n || seen.has(n)) return false;
+    if (owned.has(n)) return true;
+    seen.add(n);
+    for (const [name, [type]] of Object.entries(fdefsOf(n))) {
+      if (type === 'SFNode' && visit(n.f[name])) return true;
+      if (type === 'MFNode' && (n.f[name] || []).some(visit)) return true;
+    }
+    return false;
+  };
+  return (activeWorld.children || []).some(visit);
+};
+BR.disposeWorld = function (world) {
+  if (!world || world.disposed) return false;
+  if (BR.referencesWorld(world, BR.body && BR.body.world)) throw new Error('Cannot dispose a world used by the active scene; detach its nodes or replace the scene first.');
+  world.disposed = true;
+  const nodes = new Set(world.nodes), errors = [];
+  const i = BR.worlds.indexOf(world); if (i >= 0) BR.worlds.splice(i, 1);
+  for (const n of nodes) { n._disposed = true; BR.tickers.delete(n); }
+  const deadRoute = (r) => nodes.has(r.from) || nodes.has(r.to);
+  // A route belongs to its source's output list as well as its scene. Retained
+  // contexts must release incoming references to nodes in the disposed context.
+  for (const liveWorld of BR.worlds) {
+    liveWorld.routes = liveWorld.routes.filter((r) => !deadRoute(r));
+    for (const n of liveWorld.nodes) if (n.out) for (const field of Object.keys(n.out)) {
+      n.out[field] = n.out[field].filter((r) => !deadRoute(r));
+      if (!n.out[field].length) delete n.out[field];
+    }
+  }
+  for (const r of events.firedRoutes) if (deadRoute(r)) events.firedRoutes.delete(r);
+  world.routes.length = 0;
+  const keep = [];
+  for (let j = 0; j < events.queue.length; j += 2) { const r = events.queue[j]; if (!nodes.has(r.from) && !nodes.has(r.to)) keep.push(r, events.queue[j + 1]); }
+  events.queue.length = 0; for (const item of keep) events.queue.push(item);
+  if (BR.body) BR.body.timeSensors = (BR.body.timeSensors || []).filter((n) => !nodes.has(n));
+  for (const n of nodes) {
+    const s = BR.specs.get(n.type);
+    try { if (s && s.dispose) s.dispose(n, world); } catch (e) { errors.push(e); }
+    if (n.cbs) for (const c of Object.values(n.cbs)) c.clear();
+    n.out = null;
+  }
+  if (errors.length) throw new AggregateError(errors, 'Bridge world cleanup failed.');
+  return true;
+};
 
 // every parsed world registers its bridge nodes: init once, then tick each timestamp
-const _parse = parseX3D;
+const _parse = R.parseX3D;   // preserve extension wrappers (hall converts Disk2D, Rectangle2D and Extrusion here)
 parseX3D = function (text) {
   for (const s of BR.specs.values()) if (s.preparse) text = s.preparse(text);      // a node that is a language feature rewrites the text first (ProtoInstance expands PROTOs)
   const w = _parse(text);
@@ -62,6 +115,7 @@ R.parseX3D = parseX3D;
 
 const _recv = receive;
 receive = function (node, field, value) {
+  if (node._disposed) return;
   if (node.protoIn && node.protoIn[field]) {            // an input of a PROTO instance goes to the nodes it is connected to (and on to the instance's own node when that field is one of its own)
     for (const t of node.protoIn[field]) receive(t.node, t.field, value);
     if (!(node.protoSelf && node.protoSelf[field])) { node.f[field] = value; return; }
@@ -75,6 +129,7 @@ R.receive = receive;
 /* an output of a node that a PROTO instance exposes also reaches the instance's own field: its value is kept there and the page's listeners on the instance hear it */
 const _emit = events.emit;
 events.emit = function (node, field, value) {
+  if (node._disposed) return;
   const r = _emit.call(this, node, field, value);
   if (node.protoOut && node.protoOut[field]) for (const t of node.protoOut[field]) {
     if (t.inst === node && t.name === field) continue;
@@ -283,7 +338,7 @@ for (const t of Object.keys(DEFS)) if (!DEFS[t].metadata) DEFS[t].metadata = ['S
    The Babylon body (body-br.js) turns a pointer press on a Shape into dragStart/dragMove/dragEnd calls on the sensors that are children of the Shape's nearest group. The ray
    arrives in that group's local frame as it was at the press (the group may move while it is dragged, the frame does not). The sensor does the geometry and raises its outputs
    through BR.fire. Tests call the same three methods through BR.drag with synthetic rays. */
-BR.fire = (n, f, v) => (R.hooks && R.hooks.fire ? R.hooks.fire(n, f, v) : (n.f[f] = v, events.emit(n, f, v)));
+BR.fire = (n, f, v) => { if (!n._disposed) return R.hooks && R.hooks.fire ? R.hooks.fire(n, f, v) : (n.f[f] = v, events.emit(n, f, v)); };
 BR.drag = {
   start(n, c) { const s = BR.specs.get(n.type); if (n.f.enabled === false) return; n._dragging = true; s.dragStart(n, c); },
   move(n, c) { if (n._dragging) BR.specs.get(n.type).dragMove(n, c); },
