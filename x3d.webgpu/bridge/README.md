@@ -1,5 +1,31 @@
 # X3D 4.0 to Babylon bridge: tracker, driver, kit
 
+## Assessment and validation hardening
+
+See [ASSESSMENT-2026-11-08.md](ASSESSMENT-2026-11-08.md) for the review against `6b3cb769`, repaired validation/runtime defects, remaining semantic gaps and the bounded integration plan. [assessment-evidence.json](assessment-evidence.json) records this review's measured scope. The tracker is an aggregate reader census; it is not a rendering-conformance percentage or a list of every individual page's capabilities.
+
+Local regressions require Node 20+, Python 3 and `lxml` (the tooling tests import the Python driver). From this directory:
+
+```sh
+npm ci
+npm test
+```
+
+Browser comparisons additionally require Chromium, a pinned X_ITE distribution and, for scene tests/smoke, a pinned Babylon distribution:
+
+```sh
+npm run browser:install
+XITE_DIR=/path/to/x_ite/package/dist \
+BABYLON_JS=/path/to/babylon/package/babylon.js \
+node tools/run-tests.js BooleanToggle PositionInterpolator2D _route-chain
+```
+
+Set `CHROMIUM_EXECUTABLE` to use an existing Chromium executable. The historical receipts use X_ITE 16.6.0 and Babylon 9.32.0. Set `X3DXSD` and `X3DUOM` to the appropriate x3d_mcp schema files for driver validation/scaffolding; `xmllint` is also required for XSD checks. The local XML adapter does not cover browser DOM behavior, PROTO rewriting or rendered parity.
+
+Default fixture runs require the reference engine; `--no-xite` reports an exploratory local-only run and cannot close a batch. Failed node checks, missing reference engines, browser errors and failed regression gates return failure. Batch closure rechecks pending candidates rather than trusting stale receipts.
+
+Canonical validation imports attach a structured preflight report, exposed as `scene.getFidelityReport()`. It reports recognition, known gaps and unverified fidelity separately. Hosts assembling their own bundles must include `src/fidelity.js` after the node modules, plus the tracker catalog if they want historical gap notes. No report is a conformance certificate. `scene.dispose()` explicitly releases an unused context; current/adopted active nodes are protected. Complete media teardown and automatic active/inactive context management remain open.
+
 Goal (owner's ask, 8 Nov 2026): walk every X3D 4.0 node type, in value order, and bring each one into the Babylon bodies' reader with a fixture and a test, with a status after every 5 nodes. Standing rule: not pixel perfect, good valid Babylon engineering, gaps logged (a `gap` status and a line in the node's receipt).
 
 | file | what |

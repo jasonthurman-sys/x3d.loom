@@ -29,11 +29,8 @@ Object.assign(R.CONTAINER, { ElevationGrid: 'geometry', TextureProperties: 'text
 /* ElevationGrid -> IndexedTriangleSet at parse time (x runs along the first axis, z along the second; counter-clockwise seen from +Y is the front face) */
 (function () {
   const parse0 = R.parseX3D;
-  let serial = 5e6;
   R.parseX3D = function (text) {
     const w = parse0(text);
-    const off = (R.idBase = (R.idBase || 1e4) + 1e4); // ids are unique across every file the page loads (levels, cars, garage)
-    for (const n of w.nodes) n.id += off;
     for (const n of w.nodes) {
       if (n.type !== 'ElevationGrid') continue;
       const f = n.f, xd = f.xDimension, zd = f.zDimension, P = new Float32Array(xd * zd * 3), UV = new Float32Array(xd * zd * 2);
@@ -47,8 +44,8 @@ Object.assign(R.CONTAINER, { ElevationGrid: 'geometry', TextureProperties: 'text
         const a = j * xd + i, b = a + 1, c = a + xd, d = c + 1;
         idx[o++] = a; idx[o++] = c; idx[o++] = b; idx[o++] = b; idx[o++] = c; idx[o++] = d;
       }
-      const co = { type: 'Coordinate', def: null, f: { point: P }, id: serial++, out: null };
-      const tc = { type: 'TextureCoordinate', def: null, f: { point: UV }, id: serial++, out: null };
+      const co = { type: 'Coordinate', def: null, f: { point: P }, id: R.allocNodeId(), out: null };
+      const tc = { type: 'TextureCoordinate', def: null, f: { point: UV }, id: R.allocNodeId(), out: null };
       w.nodes.push(co, tc);
       n.type = 'IndexedTriangleSet';
       n.f = { coord: co, normal: null, color: f.color || null, texCoord: tc, attrib: [], ccw: true, colorPerVertex: true, normalPerVertex: true, solid: f.solid, index: idx, set_index: [] };

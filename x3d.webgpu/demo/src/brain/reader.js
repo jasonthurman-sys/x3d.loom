@@ -50,6 +50,10 @@ const quat = {
   },
 };
 const R = { hooks: {} };
+// IDs identify logical nodes across all execution contexts, including detached
+// scenes. Per-parse indices alias event guards and Babylon caches after import.
+let nextNodeId = 0;
+R.allocNodeId = () => nextNodeId++;
 const num = (s) => { const v = parseFloat(s); return Number.isFinite(v) ? v : 0; };
 const numList = (s) => { const t = String(s).replace(/,/g, ' ').trim(); return t ? t.split(/\s+/).map(num) : []; };
 const chunk = (a, n) => { const o = []; for (let i = 0; i + n <= a.length; i += n) o.push(a.slice(i, i + n)); return o; };
@@ -204,13 +208,13 @@ function parseNode(el, ctx) {
     if (!n) { ctx.warnings.push(`USE='${use}' comes before any DEF='${use}'.`); return null; }
     return { node: n, field: el.getAttribute('containerField') || CONTAINER[n.type] || 'children' };
   }
-  const def = DEFS[tag];
+  const def = Object.hasOwn(DEFS, tag) ? DEFS[tag] : null;
   if (!def) { if (!/^(IS|connect|field|fieldValue|meta|head|component|unit)$/.test(tag)) ctx.skipped.set(tag, (ctx.skipped.get(tag) || 0) + 1); return null; }
-  const node = { type: tag, def: el.getAttribute('DEF') || null, f: {}, id: ctx.nodes.length, out: null };
+  const node = { type: tag, def: el.getAttribute('DEF') || null, f: {}, id: R.allocNodeId(), out: null };
   for (const [name, [type, , dflt]] of Object.entries(def)) node.f[name] = type === 'MFNode' ? [] : clone(dflt);
   for (const a of el.attributes) {
     if (SKIP_ATTR.has(a.name) || a.name.includes(':')) continue;
-    const fd = def[a.name];
+    const fd = Object.hasOwn(def, a.name) ? def[a.name] : null;
     if (!fd || fd[1] === OUT || fd[1] === IN) { ctx.warnings.push(`<${tag}> has no field ${a.name}; ignored.`); continue; }
     const flat = FLAT[tag + '.' + a.name];
     node.f[a.name] = flat ? flatNums(a.value, flat) : PARSE[fd[0]] ? PARSE[fd[0]](a.value) : a.value;
@@ -249,6 +253,7 @@ const events = {
   queue: [], firedRoutes: new Set(), firedOut: new Set(), traced: new Set(), ts: 0, count: 0, onLog: null,
   begin(ts) { this.ts = ts; this.firedRoutes.clear(); this.firedOut.clear(); this.traced.clear(); this.count = 0; },
   emit(node, field, value) {
+    if (node._disposed) return;
     const key = node.id + '.' + field;
     if (this.firedOut.has(key)) return;
     this.firedOut.add(key);
@@ -268,6 +273,7 @@ const events = {
   },
 };
 function receive(node, field, value) {
+  if (node._disposed) return;
   if (field === 'set_bind') { if (node.type === 'Viewpoint' && R.hooks.bind) R.hooks.bind(node, !!value); return; } // other bindables keep the first one
   if (field === 'set_fraction' && INTERPOLATORS.has(node.type)) {
     const out = interpolate(node, value);

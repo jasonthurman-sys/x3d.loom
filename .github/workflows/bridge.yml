@@ -1,0 +1,135 @@
+# x3d.loom/.github/workflows/bridge.yml
+# Runs the X3D -> Babylon bridge checks on a clean GitHub runner, where Chromium
+# can launch (the review sandboxes could not). Requires the 2026-11-08 bridge
+# review patch (it adds package.json, the node:test suites and nonzero exits).
+#
+# Scope, stated the way the Loom wants it:
+#   local      : reader/SAI/tooling regressions in Node. No browser, no GPU.
+#   reference  : event fixtures vs pinned X_ITE in headless Chromium (SwiftShader).
+#   scene      : Babylon WebGPU body on SwiftShader. Exploratory until it has run
+#                green several times; it cannot fail the workflow yet.
+# None of these jobs measures performance or real-GPU appearance (gate G0 stays open).
+
+name: bridge
+
+on:
+  push:
+    paths: ['x3d.webgpu/**', '.github/workflows/bridge.yml']
+  pull_request:
+    paths: ['x3d.webgpu/**', '.github/workflows/bridge.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bridge-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  XITE_VERSION: '16.6.0'
+  BABYLON_VERSION: '9.32.0'
+
+defaults:
+  run:
+    shell: bash          # explicit bash gives -eo pipefail, so `| tee` cannot hide a failure
+    working-directory: x3d.webgpu/bridge
+
+jobs:
+  local:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: x3d.webgpu/bridge/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install 'lxml>=5,<7'
+      - run: npm ci
+      - name: Local regressions (tooling, fidelity, lifecycle, reused event fixtures)
+        run: npm test
+
+  reference:
+    needs: local
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: x3d.webgpu/bridge/package-lock.json
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+
+      - name: Fetch pinned engines and record their hashes
+        run: |
+          eng="$RUNNER_TEMP/engines"; mkdir -p "$eng/xite" "$eng/babylon"
+          npm pack "x_ite@$XITE_VERSION" "babylonjs@$BABYLON_VERSION" --pack-destination "$eng" --silent
+          tar xzf "$eng/x_ite-$XITE_VERSION.tgz" -C "$eng/xite"
+          tar xzf "$eng/babylonjs-$BABYLON_VERSION.tgz" -C "$eng/babylon"
+          (cd "$eng" && sha256sum *.tgz) | tee "$RUNNER_TEMP/engines.sha256"
+          echo "XITE_DIR=$eng/xite/package/dist" >> "$GITHUB_ENV"
+          echo "BABYLON_JS=$eng/babylon/package/babylon.js" >> "$GITHUB_ENV"
+
+      - name: Pick fixtures by mode
+        run: |
+          node -e '
+            const fs = require("fs");
+            const all = fs.readdirSync("fixtures").filter((f) => f.endsWith(".test.json")).sort();
+            const by = { events: [], scene: [] };
+            for (const f of all) {
+              const s = JSON.parse(fs.readFileSync("fixtures/" + f, "utf8"));
+              const mode = s.mode || "events";
+              if (by[mode]) by[mode].push(f.replace(/\.test\.json$/, ""));
+            }
+            fs.writeFileSync(process.env.RUNNER_TEMP + "/events.txt", by.events.join(" "));
+            fs.writeFileSync(process.env.RUNNER_TEMP + "/scene.txt", by.scene.join(" "));
+            console.log("events:", by.events.length, "scene:", by.scene.length);
+          '
+
+      - name: Event fixtures against X_ITE (required)
+        run: |
+          node tools/run-tests.js $(cat "$RUNNER_TEMP/events.txt") | tee "$RUNNER_TEMP/events.json"
+
+      - name: Babylon WebGPU smoke on _route-chain (exploratory)
+        continue-on-error: true
+        env:
+          SMOKE_PNG: ${{ runner.temp }}/smoke.png
+        run: |
+          node tools/smoke.js fixtures/_route-chain.x3d 4 | tee "$RUNNER_TEMP/smoke.json"
+
+      - name: Scene fixtures, Babylon body vs X_ITE (exploratory)
+        continue-on-error: true
+        run: |
+          node tools/run-tests.js $(cat "$RUNNER_TEMP/scene.txt") | tee "$RUNNER_TEMP/scene.json"
+
+      - name: Receipt
+        if: always()
+        run: |
+          {
+            echo "commit=$GITHUB_SHA"
+            echo "runner=$(uname -srm)"
+            echo "node=$(node --version)"
+            echo "chromium=$(npx playwright --version)"
+            echo "xite=$XITE_VERSION babylon=$BABYLON_VERSION"
+            echo "scope=event fixtures required; Babylon smoke and scene fixtures exploratory; SwiftShader only; no timings"
+          } | tee "$RUNNER_TEMP/receipt.txt"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bridge-receipt-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/receipt.txt
+            ${{ runner.temp }}/engines.sha256
+            ${{ runner.temp }}/events.json
+            ${{ runner.temp }}/scene.json
+            ${{ runner.temp }}/smoke.json
+            ${{ runner.temp }}/smoke.png
+          if-no-files-found: warn

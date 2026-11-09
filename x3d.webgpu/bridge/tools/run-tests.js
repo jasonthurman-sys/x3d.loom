@@ -1,11 +1,10 @@
 // node run-tests.js [--no-xite] [--babylon babylon.js] NODE...  -> prints one JSON line {env, results:{NODE:{ok, ours, xite, msg, gaps}}}
 // Every node has fixtures/NODE.x3d and fixtures/NODE.test.json. The same spec runs in two engines through the SAI both expose:
-//   ours  = the reader + SAI shim of x3d.webgpu (headless: no Babylon for mode "events"; mode "draw" adds the Babylon body on SwiftShader WebGPU)
+//   ours  = the reader + SAI shim of x3d.webgpu (headless: no Babylon for mode "events"; mode "scene" adds the Babylon body on SwiftShader WebGPU)
 //   xite  = X_ITE ($XITE_DIR, default /tmp/bb/xite/package/dist), the oracle, WebGL2 on SwiftShader
 // Spec: {node, mode, steps:[{set:[def,field,value,type?]}, {expect:[def,field,value]}, {event:[def,field,value]}, {noevent:[def,field]}], gaps:[...], xite:false to skip}
 // Values: numbers, booleans, strings, arrays; "$time" matches any epoch-scale time. Floats compare at 1e-5.
 const fs = require('fs'), path = require('path'), http = require('http');
-const { chromium } = require('playwright');
 const BR = path.resolve(__dirname, '..'), SRC = path.resolve(BR, '..', 'demo', 'src');
 const args = process.argv.slice(2); const noXite = args.includes('--no-xite');
 const bi = args.indexOf('--babylon'); const babylon = bi >= 0 ? args.splice(bi, 2)[1] : (process.env.BABYLON_JS || '/tmp/bb/t/package/babylon.js');
@@ -13,6 +12,21 @@ const names = args.filter((a) => !a.startsWith('--'));
 const XITE_DIR = process.env.XITE_DIR || '/tmp/bb/xite/package/dist';
 
 const bundle = require('./bundle.js');
+
+// A local-only run is useful, but a missing reference engine must never look like a comparison pass.
+// xiteDisagrees documents an assertion disagreement; it cannot excuse an engine that threw or did not run.
+function verdict(r, spec, skipXite, pageErrors = []) {
+  r.comparison = spec.xite === false ? 'not-applicable' : skipXite ? 'skipped' :
+    r.xiteOk === undefined ? 'unavailable' : r.xiteOk ? 'passed' : 'failed';
+  const required = spec.xite !== false && !skipXite;
+  const disagreement = r.xiteOk === false && !r.xiteError && typeof spec.xiteDisagrees === 'string' && spec.xiteDisagrees.trim();
+  r.ok = r.oursOk === true && (!required || r.xiteOk === true || !!disagreement) && !pageErrors.length;
+  r.msg = pageErrors.length ? 'page errors during the test' : required && r.xiteOk === undefined ? 'X_ITE required but unavailable; set XITE_DIR or explicitly use --no-xite' :
+    r.xiteError ? 'X_ITE could not execute the test' : disagreement ? 'X_ITE differs (' + spec.xiteDisagrees + ')' :
+    r.xiteOk === false && r.oursOk ? 'X_ITE disagrees with the spec: check the spec' : '';
+  if (pageErrors.length) r.pageErrors = pageErrors.slice();
+  return r;
+}
 
 // ---- the runner both pages share: it only uses the SAI ---------------------------------------------------------------------------------
 const RUNNER = `
@@ -37,6 +51,7 @@ const close = (a, b) => {
 };
 const show = (v) => JSON.stringify(v);
 async function runSpec(eng, spec, xml) {
+  if (!Array.isArray(spec.steps) || !spec.steps.length) throw new Error('test spec requires at least one step');
   const out = { ok: true, steps: 0, fails: [], recorded: [], map: {} }; const X = window.X3D;
   const scene = await eng.open(xml); const nodes = {}; const events = {};
   const node = (d) => (nodes[d] ||= scene.getNamedNode(d));
@@ -77,6 +92,7 @@ async function runSpec(eng, spec, xml) {
       else if (s.reset) { for (const k in events) events[k].length = 0; }
       else if (s.atleast) { const [d, f, n] = s.atleast; const l = events[d + '.' + f]; if (l.length < n) fail(d + '.' + f + ' fired ' + l.length + ' times, expected at least ' + n); }
       else if (s.noevent) { const [d, f] = s.noevent; const l = events[d + '.' + f]; if (l.length) fail(d + '.' + f + ' fired ' + show(l) + ', expected nothing'); }
+      else fail('unknown or empty test step');
     } catch (e) { fail('threw ' + String(e).slice(0, 160)); }
   }
   return out;
@@ -154,10 +170,15 @@ function serve(files) {
   }).listen(0, () => res(s)); });
 }
 
-(async () => {
-  const files = { '/bundle.js': bundle('reader'), '/bundle-body.js': bundle('body'), '/babylon.js': babylon ? fs.readFileSync(babylon, 'utf8') : '', '/ours.html': PAGE_OURS, '/xite.html': PAGE_XITE, '/ours-scene.html': PAGE_OURS_SCENE, '/xite-scene.html': PAGE_XITE_SCENE };
+async function main() {
+  if (!names.length) throw new Error('name at least one fixture to test');
+  const { chromium } = require('playwright');
+  // Event-only tests need neither the Babylon distribution nor a GPU body.
+  const files = { '/bundle.js': bundle('reader'), '/bundle-body.js': bundle('body'), '/ours.html': PAGE_OURS, '/xite.html': PAGE_XITE, '/ours-scene.html': PAGE_OURS_SCENE, '/xite-scene.html': PAGE_XITE_SCENE };
   const server = await serve(files), base = 'http://localhost:' + server.address().port;
-  const b = await chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required', '--enable-unsafe-webgpu', '--no-sandbox', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist', '--use-webgpu-adapter=swiftshader'] });
+  let b;
+  try {
+  b = await chromium.launch({ executablePath: process.env.CHROMIUM_EXECUTABLE || undefined, args: ['--autoplay-policy=no-user-gesture-required', '--enable-unsafe-webgpu', '--no-sandbox', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist', '--use-webgpu-adapter=swiftshader'] });
   const env = { chromium: b.version(), ours: 'x3d.webgpu reader + SAI shim, headless, bundle sha ' + require('crypto').createHash('sha256').update(files['/bundle.js']).digest('hex').slice(0, 12) };
   const results = {};
   const po = await b.newPage(), errs = []; po.on('pageerror', (e) => errs.push(e.message.slice(0, 200)));
@@ -165,6 +186,7 @@ function serve(files) {
   let px = null;
   if (!noXite && fs.existsSync(path.join(XITE_DIR, 'x_ite.min.js'))) { px = await b.newPage(); px.on('pageerror', (e) => errs.push('xite: ' + e.message.slice(0, 160))); await px.goto(base + '/xite.html'); await px.waitForFunction(() => window.X3D && X3D.getBrowser('#c'), null, { timeout: 60000 }).catch(() => {}); env.xite = 'X_ITE ' + (await px.evaluate(() => window.xiteInfo && window.xiteInfo().version).catch(() => '?')) + ' (WebGL2, SwiftShader)'; }
   else env.xite = noXite ? 'skipped (--no-xite)' : 'not found at ' + XITE_DIR;
+  const startupErrors = errs.slice();
   let pos = null, pxs = null;
   const mouseFor = async (pg) => { await pg.exposeFunction('__mouse', async (k, x, y) => { if (k === 'move') await pg.mouse.move(x, y, { steps: 6 }); else if (k === 'down') { await pg.mouse.move(x, y); await pg.mouse.down(); } else if (k === 'up') { await pg.mouse.move(x, y, { steps: 6 }); await pg.mouse.up(); } }); };
   // px: the composited colour of one canvas pixel, from a 1 x 1 page screenshot decoded in the page; the same route for both engines
@@ -175,30 +197,39 @@ function serve(files) {
     else if (k === 'down') await pg.keyboard.down(a); else if (k === 'up') await pg.keyboard.up(a); else if (k === 'press') await pg.keyboard.press(a); else if (k === 'type') await pg.keyboard.type(a);
   });
   async function scenePages(needX) {
+    if (!files['/babylon.js']) files['/babylon.js'] = fs.readFileSync(babylon, 'utf8');
     if (!pos) { pos = await b.newPage(); pos.on('pageerror', (e) => errs.push('scene: ' + e.message.slice(0, 200))); await pos.addInitScript(STUB); await mouseFor(pos); await pxFor(pos); await keyFor(pos); await pos.goto(base + '/ours-scene.html'); env.babylon = await pos.evaluate(() => window.sceneReady.then(() => BABYLON.Engine.Version)); }
     if (needX && !pxs && fs.existsSync(path.join(XITE_DIR, 'x_ite.min.js'))) { pxs = await b.newPage(); pxs.on('pageerror', (e) => errs.push('xite scene: ' + e.message.slice(0, 160))); await mouseFor(pxs); await pxFor(pxs); await keyFor(pxs); await pxs.goto(base + '/xite-scene.html'); await pxs.waitForFunction(() => window.X3D && X3D.getBrowser('#c'), null, { timeout: 60000 }).catch(() => {}); }
   }
   for (const n of names) {
+    const errorStart = errs.length;
     const fx = path.join(BR, 'fixtures', n + '.x3d'), ts = path.join(BR, 'fixtures', n + '.test.json');
     if (!fs.existsSync(fx) || !fs.existsSync(ts)) { results[n] = { ok: false, msg: 'missing fixture or test spec' }; continue; }
     const xml = fs.readFileSync(fx, 'utf8'), spec = JSON.parse(fs.readFileSync(ts, 'utf8'));
+    if (spec.mode && !['events', 'scene'].includes(spec.mode)) throw new Error(n + ': unsupported test mode ' + spec.mode);
     const scene = spec.mode === 'scene';
     if (scene) await scenePages(!noXite && spec.xite !== false);
-    const P = scene ? pos : po, PX = scene ? pxs : px, fnO = scene ? 'runScene' : 'runOurs', fnX = scene ? 'runScene' : 'runXite';
-    const r = { ok: false, ours: '?', xite: PX && spec.xite !== false ? '?' : 'n/a' };
+    const P = scene ? pos : po, PX = noXite || spec.xite === false ? null : scene ? pxs : px, fnO = scene ? 'runScene' : 'runOurs', fnX = scene ? 'runScene' : 'runXite';
+    const r = { ok: false, ours: '?', xite: PX ? '?' : spec.xite === false ? 'not applicable (fixture)' : noXite ? 'skipped (--no-xite)' : 'unavailable' };
     try { const o = await P.evaluate(([f, s, x]) => window[f](s, x), [fnO, spec, xml]); r.map = o.map; r.ours = o.ok ? `pass ${o.steps}/${o.steps}` : 'FAIL ' + o.fails.join(' | '); r.oursOk = o.ok; if (o.recorded.length) r.recordedOurs = o.recorded; } catch (e) { r.ours = 'ERROR ' + String(e).slice(0, 200); r.oursOk = false; }
-    if (PX && spec.xite !== false) { try { const o = await PX.evaluate(([f, s, x]) => window[f](s, x), [fnX, spec, xml]); r.mapX = o.map; r.xite = o.ok ? `pass ${o.steps}/${o.steps}` : 'FAIL ' + o.fails.join(' | '); r.xiteOk = o.ok; if (o.recorded.length) r.recordedXite = o.recorded; } catch (e) { r.xite = 'ERROR ' + String(e).slice(0, 200); r.xiteOk = false; } }
+    if (PX && spec.xite !== false) { try { const o = await PX.evaluate(([f, s, x]) => window[f](s, x), [fnX, spec, xml]); r.mapX = o.map; r.xite = o.ok ? `pass ${o.steps}/${o.steps}` : 'FAIL ' + o.fails.join(' | '); r.xiteOk = o.ok; if (o.recorded.length) r.recordedXite = o.recorded; } catch (e) { r.xite = 'ERROR ' + String(e).slice(0, 200); r.xiteOk = false; r.xiteError = true; } }
     if (r.map && r.mapX) for (const [name, tol] of spec.agree || []) {   // recorded values must agree between the engines, relative tol
       const fl = (x) => (Array.isArray(x) ? x.flatMap(fl) : [x]), a = fl(r.map[name]), c = fl(r.mapX[name]), sc = Math.max(1, ...c.map(Math.abs));
       if (!(a.length === c.length && a.every((v, i) => Math.abs(v - c[i]) <= tol * sc))) { r.oursOk = false; r.ours += ` | ${name}: ours ${JSON.stringify(r.map[name])} vs X_ITE ${JSON.stringify(r.mapX[name])} (tol ${tol})`; }
     }
-    // the bridge passes when ours passes; a disagreeing oracle is reported, and a gap if the spec lists one
-    r.ok = r.oursOk && (r.xiteOk !== false || !!spec.xiteDisagrees);
-    r.msg = r.ok ? (r.xiteOk === false ? 'X_ITE differs (' + spec.xiteDisagrees + ')' : '') : (r.oursOk ? 'X_ITE disagrees with the spec: check the spec' : '');
+    verdict(r, spec, noXite, startupErrors.concat(errs.slice(errorStart)));
     if (spec.gaps && spec.gaps.length) r.gaps = spec.gaps;
     results[n] = r;
   }
   if (errs.length) env.pageErrors = errs.slice(0, 5);
-  await b.close(); server.close();
-  console.log(JSON.stringify({ env, results }));
-})().catch((e) => { console.error(e); console.log(JSON.stringify({ error: String(e) })); process.exit(0); });
+  const ok = Object.values(results).every((r) => r.ok) && !errs.length;
+  console.log(JSON.stringify({ ok, scope: noXite ? 'local-only' : 'reference-comparison', env, results }));
+  if (!ok) process.exitCode = 1;
+  } finally {
+    if (b) await b.close();
+    await new Promise((resolve) => server.close(resolve));
+  }
+}
+
+module.exports = { verdict, RUNNER };
+if (require.main === module) main().catch((e) => { console.error(e); console.log(JSON.stringify({ ok: false, error: String(e) })); process.exitCode = 1; });
